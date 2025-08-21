@@ -5,6 +5,7 @@
     "jsr:@std/internal@^1.0.10": "1.0.10",
     "jsr:@std/path@1.0.0": "1.0.0",
     "jsr:@std/path@^1.0.2": "1.1.2",
+    "npm:@anthropic-ai/claude-code@1.0.86": "1.0.86",
     "npm:@anthropic-ai/claude-code@^1.0.86": "1.0.86"
   },
   "jsr": {

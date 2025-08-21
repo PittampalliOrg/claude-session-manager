@@ -4,6 +4,7 @@
     "cli": "deno run --allow-all claude-session-manager.ts",
     "test": "deno run --allow-all test-setup.ts",
     "compile": "deno compile --allow-all --output claude-manager claude-session-manager.ts",
+    "compile:all": "./build-all-platforms.sh",
     "hello": "deno run --allow-run hello-cli.ts"
   },
   "imports": {
