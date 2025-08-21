@@ -1,0 +1,48 @@
+# Compiled binaries
+claude-manager
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Deno cache
+.deno/
+deno.lock
+
+# Test artifacts
+*.test.md
+claude-session-*.md
+test-session-*
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.backup
+*.bak
+
+# Nix result symlinks
+result
+result-*
