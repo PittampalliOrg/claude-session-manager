@@ -10,6 +10,9 @@
  */
 
 import { parse } from "https://deno.land/std@0.224.0/flags/mod.ts";
+import { Select, Checkbox, Input, Confirm } from "@cliffy/prompt";
+import { Table } from "@cliffy/table";
+import { colors } from "@cliffy/ansi/colors";
 import { ClaudeCliWrapper } from "./claude-cli-wrapper.ts";
 import type { 
   ClaudeSession, 
@@ -19,6 +22,25 @@ import type {
 
 // Initialize CLI wrapper
 const claude = new ClaudeCliWrapper();
+
+/**
+ * Clean terminal state to prevent escape sequence issues
+ */
+function cleanTerminalState(): void {
+  try {
+    const encoder = new TextEncoder();
+    // Disable bracketed paste mode
+    Deno.stdout.writeSync(encoder.encode("\x1b[?2004l"));
+    // Reset colors and attributes
+    Deno.stdout.writeSync(encoder.encode("\x1b[0m"));
+    // Clear any pending OSC sequences
+    Deno.stdout.writeSync(encoder.encode("\x1b]110;\x07"));
+    // Clear OSC 11 background color query
+    Deno.stdout.writeSync(encoder.encode("\x1b]111;\x07"));
+  } catch {
+    // Ignore errors if output is not a terminal
+  }
+}
 
 /**
  * Execute shell command helper
@@ -68,120 +90,169 @@ function formatSession(session: ClaudeSession): string {
 }
 
 /**
- * Select session using fzf
+ * Simple selection for non-TTY environments
  */
-async function selectWithFzf(sessions: ClaudeSession[]): Promise<SessionSelection | null> {
+async function simpleSelectSession(sessions: ClaudeSession[]): Promise<SessionSelection | null> {
   if (sessions.length === 0) {
     console.log("No sessions found");
     return null;
   }
   
-  // Format sessions for display
-  const displayLines = sessions.map(formatSession).join("\n");
+  // Display sessions with numbers
+  console.log("\nAvailable Claude Sessions:\n");
+  sessions.forEach((session, index) => {
+    const date = new Date(session.timestamp).toLocaleString();
+    const icon = session.gitBranch ? "🔸" : "📁";
+    const message = session.summary || session.lastMessage || "No messages";
+    const shortMessage = message.length > 50 ? message.slice(0, 50) + "..." : message;
+    const seshName = getSeshName(session.cwd);
+    
+    console.log(`${index + 1}. ${icon} [${date}] ${seshName}`);
+    console.log(`   ${shortMessage}`);
+    console.log(`   ID: ${session.id.slice(0, 8)}...\n`);
+  });
   
-  // Create temp file for fzf input
-  const tempFile = await Deno.makeTempFile();
-  await Deno.writeTextFile(tempFile, displayLines);
+  // Prompt for selection
+  const input = prompt("Enter session number (or 'q' to quit): ");
+  
+  if (!input || input.toLowerCase() === 'q') {
+    return null;
+  }
+  
+  const index = parseInt(input) - 1;
+  if (isNaN(index) || index < 0 || index >= sessions.length) {
+    console.log(colors.red("Invalid selection"));
+    return null;
+  }
+  
+  const session = sessions[index];
+  
+  // Show action menu
+  console.log("\nChoose action:");
+  console.log("1. Resume Session");
+  console.log("2. View Conversation");
+  console.log("3. Export to Markdown");
+  console.log("4. Delete Session");
+  console.log("5. Cancel\n");
+  
+  const actionInput = prompt("Enter action number: ");
+  
+  if (!actionInput) return null;
+  
+  const actionMap: { [key: string]: SessionSelection["action"] } = {
+    "1": "resume",
+    "2": "view",
+    "3": "export",
+    "4": "delete",
+    "5": "cancel",
+  };
+  
+  const action = actionMap[actionInput];
+  if (!action) {
+    console.log(colors.red("Invalid action"));
+    return null;
+  }
+  
+  return { session, action };
+}
+
+/**
+ * Select session using Cliffy (requires TTY)
+ */
+async function selectSession(sessions: ClaudeSession[]): Promise<SessionSelection | null> {
+  if (sessions.length === 0) {
+    console.log("No sessions found");
+    return null;
+  }
+  
+  // Create options for Select prompt
+  const options = sessions.map(session => {
+    const date = new Date(session.timestamp).toLocaleString();
+    const icon = session.gitBranch ? "🔸" : "📁";
+    const status = session.status === "active" ? "🟢" : "";
+    const message = session.summary || session.lastMessage || "No messages";
+    const shortMessage = message.length > 50 ? message.slice(0, 50) + "..." : message;
+    const seshName = getSeshName(session.cwd);
+    
+    return {
+      name: `${icon} ${status} [${date}] ${seshName} - ${shortMessage}`,
+      value: session.id,
+      // Store the full session object in a custom property
+      session: session,
+    };
+  });
   
   try {
-    // Run fzf with options
-    const fzfCmd = new Deno.Command("fzf", {
-      args: [
-        "--ansi",
-        "--no-sort",
-        "--layout=reverse",
-        "--info=inline",
-        "--prompt=Select session: ",
-        "--header=Enter: Resume | F2: View | F3: Export | ESC: Cancel",
-        "--expect=f2,f3",
-      ],
-      stdin: "piped",
-      stdout: "piped",
+    // Clean terminal state before prompt
+    cleanTerminalState();
+    
+    // Use Cliffy Select prompt with search
+    const selectedId = await Select.prompt({
+      message: "Select Claude session:",
+      options: options,
+      search: true,
+      searchLabel: "Search sessions",
+      maxRows: 15,
     });
     
-    const process = fzfCmd.spawn();
-    const writer = process.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(displayLines));
-    await writer.close();
+    // Clean terminal state after prompt
+    cleanTerminalState();
     
-    const { stdout } = await process.output();
-    const output = new TextDecoder().decode(stdout).trim().split("\n");
+    if (!selectedId) return null;
     
-    if (output.length < 2) return null;
-    
-    const key = output[0];
-    const selected = output[1];
-    
-    if (!selected) return null;
-    
-    // Parse selection to get session ID
-    const parts = selected.split("|");
-    const sessionId = parts[1]?.trim();
-    
-    if (!sessionId) return null;
-    
-    // Find the session
-    const session = sessions.find(s => s.id === sessionId);
+    // Find the selected session
+    const session = sessions.find(s => s.id === selectedId);
     if (!session) return null;
     
-    // Determine action based on key
-    let action: SessionSelection["action"] = "resume";
-    if (key === "f2") action = "view";
-    else if (key === "f3") action = "export";
+    // Show action menu
+    const action = await Select.prompt({
+      message: "Choose action:",
+      options: [
+        { name: "Resume Session", value: "resume" },
+        { name: "View Conversation", value: "view" },
+        { name: "Export to Markdown", value: "export" },
+        { name: "Delete Session", value: "delete" },
+        { name: "Cancel", value: "cancel" },
+      ],
+    });
     
-    return { session, action };
-  } finally {
-    await Deno.remove(tempFile);
+    return { session, action: action as SessionSelection["action"] };
+  } catch (error) {
+    // User cancelled (Ctrl+C)
+    if (error instanceof Error && error.message.includes("Cancelled")) {
+      return null;
+    }
+    throw error;
   }
 }
 
 /**
- * Select session using gum
+ * Display sessions in a table
  */
-async function selectWithGum(sessions: ClaudeSession[]): Promise<SessionSelection | null> {
-  if (sessions.length === 0) {
-    console.log("No sessions found");
-    return null;
+function displaySessionsTable(sessions: ClaudeSession[]): void {
+  const table = new Table()
+    .header(["Icon", "Status", "Date", "Directory", "Summary", "ID"])
+    .border(true);
+  
+  for (const session of sessions) {
+    const date = new Date(session.timestamp).toLocaleString();
+    const icon = session.gitBranch ? "🔸" : "📁";
+    const status = session.status === "active" ? "🟢" : "⚪";
+    const message = session.summary || session.lastMessage || "No messages";
+    const shortMessage = message.length > 50 ? message.slice(0, 50) + "..." : message;
+    const seshName = getSeshName(session.cwd);
+    
+    table.push([
+      icon,
+      status,
+      date,
+      seshName,
+      shortMessage,
+      session.id.slice(0, 8) + "...",
+    ]);
   }
   
-  // Use gum filter for selection
-  const displayLines = sessions.map(formatSession);
-  const selected = await exec("gum", [
-    "filter",
-    "--placeholder", "Search for a Claude session...",
-    "--indicator", "▶",
-    "--header", "Select Claude session:",
-    ...displayLines,
-  ]);
-  
-  if (!selected) return null;
-  
-  // Parse selection
-  const parts = selected.split("|");
-  const sessionId = parts[1]?.trim();
-  
-  if (!sessionId) return null;
-  
-  const session = sessions.find(s => s.id === sessionId);
-  if (!session) return null;
-  
-  // Show action menu
-  const action = await exec("gum", [
-    "choose",
-    "Resume Session",
-    "View Conversation",
-    "Export to Markdown",
-    "Delete Session",
-    "Cancel",
-  ]);
-  
-  switch (action) {
-    case "Resume Session": return { session, action: "resume" };
-    case "View Conversation": return { session, action: "view" };
-    case "Export to Markdown": return { session, action: "export" };
-    case "Delete Session": return { session, action: "delete" };
-    default: return { session, action: "cancel" };
-  }
+  table.render();
 }
 
 /**
@@ -191,12 +262,33 @@ async function connectAndResume(session: ClaudeSession): Promise<void> {
   const seshName = getSeshName(session.cwd);
   const windowName = `claude-${session.id.slice(0, 8)}`;
   
-  console.log(`📍 Resuming session in ${session.cwd}`);
-  console.log(`🏷️ Sesh name: ${seshName}`);
-  console.log(`🆔 Session ID: ${session.id.slice(0, 8)}...`);
+  console.log(colors.cyan(`📍 Resuming session in ${session.cwd}`));
+  console.log(colors.blue(`🏷️ Sesh name: ${seshName}`));
+  console.log(colors.gray(`🆔 Session ID: ${session.id.slice(0, 8)}...`));
   
   // Check if we're in tmux
   const inTmux = Deno.env.get("TMUX") !== undefined;
+  
+  // Option to run without tmux
+  const useTmux = await commandExists("tmux") && (inTmux || Deno.stdout.isTerminal());
+  
+  if (!useTmux) {
+    // Direct execution without tmux
+    console.log(colors.yellow("Running Claude directly (no tmux)..."));
+    const cmd = new Deno.Command("claude", {
+      args: ["--resume", session.id],
+      cwd: session.cwd,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    
+    const { code } = await cmd.output();
+    if (code !== 0) {
+      console.error(colors.red(`Failed to resume session (exit code: ${code})`));
+    }
+    return;
+  }
   
   // Check if tmux session exists
   let sessionExists = false;
@@ -209,15 +301,25 @@ async function connectAndResume(session: ClaudeSession): Promise<void> {
   
   if (sessionExists) {
     if (inTmux) {
-      // Switch to session and create new window
-      await exec("tmux", ["switch-client", "-t", seshName]);
+      // Create new window in existing session
       await exec("tmux", ["new-window", "-a", "-t", seshName, "-c", session.cwd, "-n", windowName]);
       await exec("tmux", ["send-keys", "-t", `${seshName}:${windowName}`, `claude --resume ${session.id}`, "C-m"]);
+      // Switch to the new window instead of switching sessions
+      await exec("tmux", ["select-window", "-t", `${seshName}:${windowName}`]);
+      console.log(colors.green(`✓ Created new window in session ${seshName}`));
     } else {
       // Create window and attach
       await exec("tmux", ["new-window", "-a", "-t", seshName, "-c", session.cwd, "-n", windowName]);
       await exec("tmux", ["send-keys", "-t", `${seshName}:${windowName}`, `claude --resume ${session.id}`, "C-m"]);
-      await exec("tmux", ["attach-session", "-t", seshName]);
+      
+      // Use exec to replace current process when attaching
+      const attachCmd = new Deno.Command("tmux", {
+        args: ["attach-session", "-t", seshName],
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      await attachCmd.output();
     }
   } else {
     // Create new session
@@ -225,9 +327,18 @@ async function connectAndResume(session: ClaudeSession): Promise<void> {
     await exec("tmux", ["send-keys", "-t", `${seshName}:${windowName}`, `claude --resume ${session.id}`, "C-m"]);
     
     if (inTmux) {
-      await exec("tmux", ["switch-client", "-t", seshName]);
+      // Switch to the new session
+      console.log(colors.yellow("Please switch to the new session manually with:"));
+      console.log(colors.cyan(`  tmux switch-client -t ${seshName}`));
     } else {
-      await exec("tmux", ["attach-session", "-t", seshName]);
+      // Attach to the new session
+      const attachCmd = new Deno.Command("tmux", {
+        args: ["attach-session", "-t", seshName],
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      await attachCmd.output();
     }
   }
 }
@@ -238,17 +349,46 @@ async function connectAndResume(session: ClaudeSession): Promise<void> {
 async function viewSession(session: ClaudeSession): Promise<void> {
   const content = await claude.exportSession(session.id, "markdown");
   
-  // Use gum pager to display
-  const pager = new Deno.Command("gum", {
-    args: ["pager"],
-    stdin: "piped",
-  });
+  // Check if we have a TTY and can use a pager
+  const hasTty = Deno.stdout.isTerminal();
+  const hasLess = await commandExists("less");
+  const hasGum = await commandExists("gum");
   
-  const process = pager.spawn();
-  const writer = process.stdin.getWriter();
-  await writer.write(new TextEncoder().encode(content));
-  await writer.close();
-  await process.status;
+  if (hasTty && hasGum) {
+    // Try gum pager
+    try {
+      const pager = new Deno.Command("gum", {
+        args: ["pager"],
+        stdin: "piped",
+      });
+      
+      const process = pager.spawn();
+      const writer = process.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(content));
+      await writer.close();
+      await process.status;
+      return;
+    } catch {
+      // Fall through to alternatives
+    }
+  }
+  
+  if (hasTty && hasLess) {
+    // Use less as fallback
+    const pager = new Deno.Command("less", {
+      args: ["-R"], // Allow ANSI colors
+      stdin: "piped",
+    });
+    
+    const process = pager.spawn();
+    const writer = process.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(content));
+    await writer.close();
+    await process.status;
+  } else {
+    // No pager available or no TTY, just output to stdout
+    console.log(content);
+  }
 }
 
 /**
@@ -268,42 +408,58 @@ async function exportSession(session: ClaudeSession, format: ExportFormat = "mar
 async function main() {
   // Parse arguments
   const flags = parse(Deno.args, {
-    boolean: ["help", "gum", "fzf", "list", "zoxide"],
+    boolean: ["help", "list", "zoxide", "no-tmux", "simple", "debug"],
     string: ["resume", "view", "export", "delete", "search"],
     alias: { h: "help", l: "list", r: "resume", v: "view", e: "export", d: "delete", s: "search" },
   });
   
+  // Detect if running as compiled binary or from source
+  // When compiled, Deno.execPath() will be the binary itself, not the deno executable
+  const execPath = Deno.execPath();
+  const isCompiled = !execPath.includes("deno") || execPath.endsWith("claude-manager");
+  const programName = isCompiled ? "claude-manager" : "deno run --allow-all claude-session-manager.ts";
+  
   // Show help
   if (flags.help) {
     console.log(`
-Claude Session Manager - Deno TypeScript Implementation
+Claude Session Manager${isCompiled ? "" : " - Deno TypeScript Implementation"}
 
-Usage: deno run --allow-all claude-session-manager.ts [OPTIONS]
+Usage: ${programName} [OPTIONS]
 
 Options:
   -h, --help          Show this help message
-  -l, --list          List all sessions
+  -l, --list          List all sessions in a table
   -r, --resume ID     Resume specific session
   -v, --view ID       View session conversation
   -e, --export ID     Export session to markdown
   -d, --delete ID     Delete session
   -s, --search TERM   Search sessions
-  --gum               Use gum for selection (default)
-  --fzf               Use fzf for selection
+  --simple            Use simple text-based selection (no interactive UI)
+  --no-tmux           Run without tmux integration
   --zoxide            Sort by zoxide frecency
+  --debug             Show debug information for troubleshooting
 
 Examples:
-  # Interactive selection with gum
-  deno run --allow-all claude-session-manager.ts
+  # Interactive selection
+  ${programName}
   
-  # Use fzf for selection
-  deno run --allow-all claude-session-manager.ts --fzf
+  # List all sessions
+  ${programName} --list
   
   # Resume specific session
-  deno run --allow-all claude-session-manager.ts --resume abc123
+  ${programName} --resume abc123
   
   # Search sessions
-  deno run --allow-all claude-session-manager.ts --search "typescript"
+  ${programName} --search "typescript"
+  
+  # Run without tmux
+  ${programName} --no-tmux --resume abc123
+  
+  # Force simple mode
+  CLAUDE_MANAGER_SIMPLE=true ${programName}
+  
+  # Debug TTY detection
+  ${programName} --debug
 `);
     Deno.exit(0);
   }
@@ -371,16 +527,52 @@ Examples:
       Deno.exit(1);
     }
   } else if (flags.list) {
-    // List all sessions
-    for (const session of sessions) {
-      console.log(formatSession(session));
-    }
+    // List all sessions in a table
+    displaySessionsTable(sessions);
   } else {
-    // Interactive selection
-    const useFzf = flags.fzf || !(await commandExists("gum"));
-    const selection = useFzf 
-      ? await selectWithFzf(sessions)
-      : await selectWithGum(sessions);
+    // Interactive selection - check if we can use Cliffy or need simple mode
+    const stdinTty = Deno.stdin.isTerminal();
+    const stdoutTty = Deno.stdout.isTerminal();
+    const termEnv = Deno.env.get("TERM") || "unknown";
+    const forceSimple = Deno.env.get("CLAUDE_MANAGER_SIMPLE") === "true";
+    
+    // More robust TTY detection
+    const hasTty = stdinTty && stdoutTty && termEnv !== "dumb";
+    const useSimple = flags.simple || forceSimple || !hasTty;
+    
+    // Debug mode
+    if (flags.debug) {
+      console.log(colors.gray("=== Debug Info ==="));
+      console.log(colors.gray(`TTY stdin: ${stdinTty}`));
+      console.log(colors.gray(`TTY stdout: ${stdoutTty}`));
+      console.log(colors.gray(`TERM: ${termEnv}`));
+      console.log(colors.gray(`Force simple: ${forceSimple}`));
+      console.log(colors.gray(`Use simple mode: ${useSimple}`));
+      console.log(colors.gray("==================\n"));
+    }
+    
+    if (useSimple && !flags.simple && !forceSimple) {
+      console.log(colors.yellow("Note: Using simple selection mode (no TTY detected)"));
+      if (flags.debug) {
+        console.log(colors.gray(`Reason: stdin=${stdinTty}, stdout=${stdoutTty}, TERM=${termEnv}`));
+      }
+    }
+    
+    let selection: SessionSelection | null = null;
+    
+    if (!useSimple) {
+      try {
+        selection = await selectSession(sessions);
+      } catch (error) {
+        console.log(colors.yellow("Interactive mode failed, falling back to simple mode"));
+        if (flags.debug) {
+          console.error(colors.red(`Error: ${error}`));
+        }
+        selection = await simpleSelectSession(sessions);
+      }
+    } else {
+      selection = await simpleSelectSession(sessions);
+    }
     
     if (selection) {
       switch (selection.action) {
@@ -395,7 +587,10 @@ Examples:
           break;
         case "delete":
           await claude.deleteSession(selection.session.id);
-          console.log("✅ Session deleted");
+          console.log(colors.green("✅ Session deleted"));
+          break;
+        case "cancel":
+          console.log(colors.gray("Cancelled"));
           break;
       }
     }

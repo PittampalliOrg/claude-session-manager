@@ -29,13 +29,15 @@ export class ClaudeCliWrapper {
    */
   private async executeCommand(
     cmd: string,
-    args: string[] = []
+    args: string[] = [],
+    options?: { cwd?: string }
   ): Promise<CommandResult> {
     const command = new Deno.Command(cmd, {
       args,
       stdout: "piped",
       stderr: "piped",
       stdin: "piped",
+      cwd: options?.cwd,
     });
 
     const { code, stdout, stderr } = await command.output();
@@ -99,7 +101,8 @@ export class ClaudeCliWrapper {
   async resumeSession(sessionId: string, cwd?: string): Promise<CommandResult> {
     return this.executeCommand(
       this.claudeCommand,
-      ["--resume", sessionId]
+      ["--resume", sessionId],
+      { cwd }
     );
   }
 
@@ -161,13 +164,28 @@ export class ClaudeCliWrapper {
       for (const line of lines) {
         try {
           const entry = JSON.parse(line) as SessionFileEntry;
-          if (entry.type === "message") {
+          // Check for both old and new formats
+          if (entry.type === "message" || entry.type === "user" || entry.type === "assistant") {
+            // Skip meta messages
+            if ((entry as any).isMeta) continue;
+            
             messageCount++;
-            if (entry.message?.role === "user") {
-              const content = entry.message.content;
-              lastMessage = typeof content === "string" 
-                ? content 
-                : content[0]?.text || "";
+            
+            // Extract user messages for lastMessage
+            const role = entry.message?.role || entry.type;
+            if (role === "user") {
+              const content = entry.message?.content;
+              // Skip command messages
+              if (typeof content === "string") {
+                if (!content.includes("<command-name>") && !content.includes("<local-command-stdout>")) {
+                  lastMessage = content;
+                }
+              } else if (Array.isArray(content)) {
+                const textContent = content[0]?.text || "";
+                if (textContent && !textContent.includes("<command-name>")) {
+                  lastMessage = textContent;
+                }
+              }
             }
           } else if (entry.type === "summary") {
             summary = entry.summary || "";
@@ -232,23 +250,77 @@ export class ClaudeCliWrapper {
     // Format as markdown
     let markdown = `# Claude Session ${sessionId}\n\n`;
     
+    // Parse all entries first
+    let metadata: any = {};
+    const messages: any[] = [];
+    
     for (const line of lines) {
       try {
         const entry = JSON.parse(line) as SessionFileEntry;
-        if (entry.type === "message" && entry.message) {
-          const timestamp = new Date(entry.timestamp).toLocaleString();
-          const role = entry.message.role.toUpperCase();
-          const content = typeof entry.message.content === "string"
-            ? entry.message.content
-            : entry.message.content[0]?.text || "";
-          
-          markdown += `## ${role} [${timestamp}]\n\n${content}\n\n`;
+        if (entry.type === "metadata") {
+          metadata = entry;
+        } else if ((entry.type === "message" || entry.type === "user" || entry.type === "assistant")) {
+          // Skip meta messages
+          if (!(entry as any).isMeta) {
+            messages.push(entry);
+          }
         } else if (entry.type === "summary") {
-          markdown += `## Summary\n\n${entry.summary}\n\n`;
+          metadata.summary = entry.summary;
         }
       } catch {
         // Skip malformed lines
       }
+    }
+    
+    // Add session info
+    if (metadata.cwd || metadata.gitBranch) {
+      markdown += `## Session Info\n\n`;
+      if (metadata.cwd) markdown += `- **Directory:** ${metadata.cwd}\n`;
+      if (metadata.gitBranch) markdown += `- **Git Branch:** ${metadata.gitBranch}\n`;
+      if (metadata.timestamp) markdown += `- **Started:** ${new Date(metadata.timestamp).toLocaleString()}\n`;
+      markdown += `\n`;
+    }
+    
+    // Add summary if available
+    if (metadata.summary) {
+      markdown += `## Summary\n\n${metadata.summary}\n\n`;
+    }
+    
+    // Add conversation
+    if (messages.length > 0) {
+      markdown += `## Conversation\n\n`;
+      for (const entry of messages) {
+        const timestamp = new Date(entry.timestamp).toLocaleString();
+        // Handle both old and new formats
+        const role = entry.message?.role || entry.type;
+        const roleIcon = role === 'user' ? '👤' : '🤖';
+        
+        markdown += `### ${roleIcon} ${role.charAt(0).toUpperCase() + role.slice(1)} (${timestamp})\n\n`;
+        
+        // Handle different content types
+        const content = entry.message?.content;
+        if (typeof content === "string") {
+          markdown += `${content}\n\n`;
+        } else if (Array.isArray(content)) {
+          for (const item of content) {
+            if (item.type === "text") {
+              markdown += `${item.text}\n\n`;
+            } else if (item.type === "tool_use") {
+              markdown += `🔧 **Tool:** ${item.name}\n`;
+              if (item.input) {
+                markdown += `\`\`\`json\n${JSON.stringify(item.input, null, 2)}\n\`\`\`\n\n`;
+              }
+            } else if (item.type === "tool_result") {
+              markdown += `📤 **Tool Result:**\n`;
+              markdown += `\`\`\`\n${item.content || 'No output'}\n\`\`\`\n\n`;
+            }
+          }
+        }
+        
+        markdown += `---\n\n`;
+      }
+    } else {
+      markdown += `## Conversation\n\n*No messages in this session*\n\n`;
     }
     
     return markdown;
@@ -285,13 +357,15 @@ export class ClaudeCliWrapper {
    */
   async *streamInteraction(
     sessionId: string,
-    input: AsyncIterable<string>
+    input: AsyncIterable<string>,
+    cwd?: string
   ): AsyncGenerator<string, void> {
     const command = new Deno.Command(this.claudeCommand, {
       args: ["--resume", sessionId],
       stdout: "piped",
       stderr: "piped",
       stdin: "piped",
+      cwd,
     });
 
     const process = command.spawn();
