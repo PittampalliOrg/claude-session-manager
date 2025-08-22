@@ -72,20 +72,107 @@ export interface ClaudeSession {
 }
 
 /**
- * Session file entry as stored in JSONL format
+ * Base session entry fields
  */
-export interface SessionFileEntry {
-  type: 'message' | 'summary' | 'metadata';
+interface BaseSessionEntry {
   timestamp: string;
-  message?: {
-    role: 'user' | 'assistant' | 'system';
-    content: string | Array<{ text: string; type?: string }>;
-  };
-  summary?: string;
+  sessionId?: string;
+  uuid?: string;
+  parentUuid?: string | null;
+  isMeta?: boolean;
+  isSidechain?: boolean;
+  userType?: string;
   cwd?: string;
   gitBranch?: string;
-  sessionId?: string;
+  version?: string;
+  requestId?: string;
 }
+
+/**
+ * Metadata entry for session initialization
+ */
+export interface MetadataEntry extends BaseSessionEntry {
+  type: 'metadata';
+}
+
+/**
+ * Summary entry for session summaries
+ */
+export interface SummaryEntry extends BaseSessionEntry {
+  type: 'summary';
+  summary: string;
+}
+
+/**
+ * Wrapped message format (newer format)
+ */
+export interface WrappedMessageEntry extends BaseSessionEntry {
+  type: 'message';
+  message: {
+    role: 'user' | 'assistant' | 'system';
+    content: string | Array<{
+      type: 'text' | 'tool_use' | 'tool_result';
+      text?: string;
+      content?: string;
+      name?: string;
+      id?: string;
+      tool_use_id?: string;
+      input?: any;
+    }>;
+  };
+}
+
+/**
+ * Direct user message format (older format)
+ */
+export interface DirectUserEntry extends BaseSessionEntry {
+  type: 'user';
+  message: {
+    role: 'user';
+    content: string | Array<{
+      type: 'text' | 'tool_result';
+      text?: string;
+      content?: string;
+      tool_use_id?: string;
+    }>;
+  };
+}
+
+/**
+ * Direct assistant message format (older format)
+ */
+export interface DirectAssistantEntry extends BaseSessionEntry {
+  type: 'assistant';
+  message: {
+    id: string;
+    type: 'message';
+    role: 'assistant';
+    model: string;
+    content: Array<{
+      type: 'text' | 'tool_use';
+      text?: string;
+      id?: string;
+      name?: string;
+      input?: any;
+    }>;
+    stop_reason?: string | null;
+    stop_sequence?: string | null;
+    usage?: {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation?: any;
+      service_tier?: string;
+    };
+  };
+  toolUseResult?: any;
+}
+
+/**
+ * Union type for all session file entries
+ */
+export type SessionFileEntry = MetadataEntry | SummaryEntry | WrappedMessageEntry | DirectUserEntry | DirectAssistantEntry;
 
 /**
  * Configuration for our Claude session manager
@@ -156,7 +243,7 @@ export interface ExportConfig {
 }
 
 /**
- * Type guard functions
+ * Type guard functions for SDK messages
  */
 export function isSDKUserMessage(msg: SDKMessage): msg is SDKUserMessage {
   return 'type' in msg && msg.type === 'user';
@@ -172,4 +259,102 @@ export function isSDKSystemMessage(msg: SDKMessage): msg is SDKSystemMessage {
 
 export function isSDKResultMessage(msg: SDKMessage): msg is SDKResultMessage {
   return 'type' in msg && msg.type === 'result';
+}
+
+/**
+ * Type guard functions for session file entries
+ */
+export function isMetadataEntry(entry: SessionFileEntry): entry is MetadataEntry {
+  return entry.type === 'metadata';
+}
+
+export function isSummaryEntry(entry: SessionFileEntry): entry is SummaryEntry {
+  return entry.type === 'summary';
+}
+
+export function isWrappedMessageEntry(entry: SessionFileEntry): entry is WrappedMessageEntry {
+  return entry.type === 'message';
+}
+
+export function isDirectUserEntry(entry: SessionFileEntry): entry is DirectUserEntry {
+  return entry.type === 'user';
+}
+
+export function isDirectAssistantEntry(entry: SessionFileEntry): entry is DirectAssistantEntry {
+  return entry.type === 'assistant';
+}
+
+/**
+ * Check if an entry is any type of message (wrapped or direct)
+ */
+export function isMessageEntry(entry: SessionFileEntry): entry is WrappedMessageEntry | DirectUserEntry | DirectAssistantEntry {
+  return entry.type === 'message' || entry.type === 'user' || entry.type === 'assistant';
+}
+
+/**
+ * Normalize any message entry to a common format
+ */
+export function normalizeMessageEntry(entry: SessionFileEntry): {
+  role: 'user' | 'assistant' | 'system';
+  content: any;
+  timestamp: string;
+  isMeta?: boolean;
+} | null {
+  if (!isMessageEntry(entry)) {
+    return null;
+  }
+
+  // Skip meta messages
+  if (entry.isMeta) {
+    return {
+      role: 'system',
+      content: '',
+      timestamp: entry.timestamp,
+      isMeta: true,
+    };
+  }
+
+  if (isWrappedMessageEntry(entry)) {
+    return {
+      role: entry.message.role,
+      content: entry.message.content,
+      timestamp: entry.timestamp,
+    };
+  }
+
+  if (isDirectUserEntry(entry)) {
+    return {
+      role: 'user',
+      content: entry.message.content,
+      timestamp: entry.timestamp,
+    };
+  }
+
+  if (isDirectAssistantEntry(entry)) {
+    return {
+      role: 'assistant',
+      content: entry.message.content,
+      timestamp: entry.timestamp,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Extract text content from message content
+ */
+export function extractTextContent(content: any): string {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((item: any) => item.type === 'text' && item.text)
+      .map((item: any) => item.text);
+    return texts.join('\n');
+  }
+
+  return '';
 }

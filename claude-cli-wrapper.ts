@@ -12,6 +12,16 @@ import type {
   CommandResult,
   ClaudeCodeOptions,
   PermissionMode,
+  MetadataEntry,
+  SummaryEntry,
+} from "./claude-types.ts";
+
+import {
+  isMessageEntry,
+  isMetadataEntry,
+  isSummaryEntry,
+  normalizeMessageEntry,
+  extractTextContent,
 } from "./claude-types.ts";
 
 /**
@@ -153,53 +163,68 @@ export class ClaudeCliWrapper {
       const filename = filePath.split("/").pop() || "";
       const sessionId = filename.replace(".jsonl", "");
       
-      // Parse first line for metadata
-      const firstEntry = JSON.parse(lines[0]) as SessionFileEntry;
-      
-      // Count messages
+      // Parse entries
+      let metadata: MetadataEntry | null = null;
       let messageCount = 0;
       let lastMessage = "";
       let summary = "";
+      let timestamp = new Date().toISOString();
+      let cwd = Deno.cwd();
+      let gitBranch: string | undefined;
       
       for (const line of lines) {
         try {
           const entry = JSON.parse(line) as SessionFileEntry;
-          // Check for both old and new formats
-          if (entry.type === "message" || entry.type === "user" || entry.type === "assistant") {
-            // Skip meta messages
-            if ((entry as any).isMeta) continue;
-            
-            messageCount++;
-            
-            // Extract user messages for lastMessage
-            const role = entry.message?.role || entry.type;
-            if (role === "user") {
-              const content = entry.message?.content;
-              // Skip command messages
-              if (typeof content === "string") {
-                if (!content.includes("<command-name>") && !content.includes("<local-command-stdout>")) {
-                  lastMessage = content;
-                }
-              } else if (Array.isArray(content)) {
-                const textContent = content[0]?.text || "";
-                if (textContent && !textContent.includes("<command-name>")) {
-                  lastMessage = textContent;
+          
+          // Handle metadata
+          if (isMetadataEntry(entry)) {
+            metadata = entry;
+            timestamp = entry.timestamp || timestamp;
+            cwd = entry.cwd || cwd;
+            gitBranch = entry.gitBranch;
+          }
+          // Handle summary
+          else if (isSummaryEntry(entry)) {
+            summary = entry.summary;
+          }
+          // Handle messages
+          else if (isMessageEntry(entry)) {
+            const normalized = normalizeMessageEntry(entry);
+            if (normalized && !normalized.isMeta) {
+              messageCount++;
+              
+              // Extract last user message
+              if (normalized.role === "user") {
+                const text = extractTextContent(normalized.content);
+                // Skip command messages
+                if (text && !text.includes("<command-name>") && !text.includes("<local-command-stdout>")) {
+                  lastMessage = text;
                 }
               }
             }
-          } else if (entry.type === "summary") {
-            summary = entry.summary || "";
           }
         } catch {
           // Skip malformed lines
         }
       }
       
+      // Use metadata if available, otherwise use first entry
+      if (!metadata && lines.length > 0) {
+        try {
+          const firstEntry = JSON.parse(lines[0]) as SessionFileEntry;
+          timestamp = firstEntry.timestamp || timestamp;
+          cwd = firstEntry.cwd || cwd;
+          gitBranch = firstEntry.gitBranch;
+        } catch {
+          // Ignore parse errors
+        }
+      }
+      
       return {
         id: sessionId,
-        timestamp: firstEntry.timestamp || new Date().toISOString(),
-        cwd: firstEntry.cwd || Deno.cwd(),
-        gitBranch: firstEntry.gitBranch,
+        timestamp,
+        cwd,
+        gitBranch,
         status: "completed",
         messageCount,
         lastMessage: lastMessage.slice(0, 100),
@@ -250,22 +275,40 @@ export class ClaudeCliWrapper {
     // Format as markdown
     let markdown = `# Claude Session ${sessionId}\n\n`;
     
-    // Parse all entries first
-    let metadata: any = {};
-    const messages: any[] = [];
+    // Parse all entries using new type system
+    let metadata: MetadataEntry | null = null;
+    let summary = "";
+    const messages: Array<{
+      role: string;
+      content: any;
+      timestamp: string;
+      model?: string;
+    }> = [];
     
     for (const line of lines) {
       try {
         const entry = JSON.parse(line) as SessionFileEntry;
-        if (entry.type === "metadata") {
+        
+        if (isMetadataEntry(entry)) {
           metadata = entry;
-        } else if ((entry.type === "message" || entry.type === "user" || entry.type === "assistant")) {
-          // Skip meta messages
-          if (!(entry as any).isMeta) {
-            messages.push(entry);
+        } else if (isSummaryEntry(entry)) {
+          summary = entry.summary;
+        } else if (isMessageEntry(entry)) {
+          const normalized = normalizeMessageEntry(entry);
+          if (normalized && !normalized.isMeta) {
+            // Add model info for assistant messages if available
+            let model: string | undefined;
+            if (entry.type === 'assistant' && 'message' in entry) {
+              model = (entry.message as any).model;
+            }
+            
+            messages.push({
+              role: normalized.role,
+              content: normalized.content,
+              timestamp: normalized.timestamp,
+              model,
+            });
           }
-        } else if (entry.type === "summary") {
-          metadata.summary = entry.summary;
         }
       } catch {
         // Skip malformed lines
@@ -273,46 +316,66 @@ export class ClaudeCliWrapper {
     }
     
     // Add session info
-    if (metadata.cwd || metadata.gitBranch) {
+    if (metadata) {
       markdown += `## Session Info\n\n`;
       if (metadata.cwd) markdown += `- **Directory:** ${metadata.cwd}\n`;
       if (metadata.gitBranch) markdown += `- **Git Branch:** ${metadata.gitBranch}\n`;
       if (metadata.timestamp) markdown += `- **Started:** ${new Date(metadata.timestamp).toLocaleString()}\n`;
+      if (metadata.version) markdown += `- **CLI Version:** ${metadata.version}\n`;
       markdown += `\n`;
     }
     
     // Add summary if available
-    if (metadata.summary) {
-      markdown += `## Summary\n\n${metadata.summary}\n\n`;
+    if (summary) {
+      markdown += `## Summary\n\n${summary}\n\n`;
     }
     
     // Add conversation
     if (messages.length > 0) {
       markdown += `## Conversation\n\n`;
-      for (const entry of messages) {
-        const timestamp = new Date(entry.timestamp).toLocaleString();
-        // Handle both old and new formats
-        const role = entry.message?.role || entry.type;
-        const roleIcon = role === 'user' ? '👤' : '🤖';
+      
+      for (const msg of messages) {
+        const timestamp = new Date(msg.timestamp).toLocaleString();
+        const roleIcon = msg.role === 'user' ? '👤' : msg.role === 'assistant' ? '🤖' : '⚙️';
+        const roleLabel = msg.role.charAt(0).toUpperCase() + msg.role.slice(1);
         
-        markdown += `### ${roleIcon} ${role.charAt(0).toUpperCase() + role.slice(1)} (${timestamp})\n\n`;
+        markdown += `### ${roleIcon} ${roleLabel}`;
+        if (msg.model) {
+          markdown += ` (${msg.model})`;
+        }
+        markdown += ` - ${timestamp}\n\n`;
         
-        // Handle different content types
-        const content = entry.message?.content;
-        if (typeof content === "string") {
-          markdown += `${content}\n\n`;
-        } else if (Array.isArray(content)) {
-          for (const item of content) {
+        // Render content based on type
+        if (typeof msg.content === "string") {
+          markdown += `${msg.content}\n\n`;
+        } else if (Array.isArray(msg.content)) {
+          for (const item of msg.content) {
             if (item.type === "text") {
-              markdown += `${item.text}\n\n`;
+              markdown += `${item.text || ''}\n\n`;
             } else if (item.type === "tool_use") {
-              markdown += `🔧 **Tool:** ${item.name}\n`;
+              markdown += `#### 🔧 Tool Use: ${item.name}\n`;
+              if (item.id) {
+                markdown += `*Tool ID: ${item.id}*\n\n`;
+              }
               if (item.input) {
+                markdown += `**Input:**\n`;
                 markdown += `\`\`\`json\n${JSON.stringify(item.input, null, 2)}\n\`\`\`\n\n`;
               }
             } else if (item.type === "tool_result") {
-              markdown += `📤 **Tool Result:**\n`;
-              markdown += `\`\`\`\n${item.content || 'No output'}\n\`\`\`\n\n`;
+              markdown += `#### 📤 Tool Result\n`;
+              if (item.tool_use_id) {
+                markdown += `*For tool: ${item.tool_use_id}*\n\n`;
+              }
+              const resultContent = item.content || item.text || 'No output';
+              // Check if content looks like JSON
+              try {
+                const parsed = typeof resultContent === 'string' && resultContent.startsWith('{') 
+                  ? JSON.parse(resultContent) : resultContent;
+                markdown += `\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\`\n\n`;
+              } catch {
+                // Not JSON, display as text
+                markdown += `\`\`\`\n${resultContent}\n\`\`\`\n\n`;
+              }
             }
           }
         }
@@ -320,7 +383,7 @@ export class ClaudeCliWrapper {
         markdown += `---\n\n`;
       }
     } else {
-      markdown += `## Conversation\n\n*No messages in this session*\n\n`;
+      markdown += `## Conversation\n\n*No messages found in this session*\n\n`;
     }
     
     return markdown;
