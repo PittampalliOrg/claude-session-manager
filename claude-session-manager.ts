@@ -14,6 +14,7 @@ import { Select, Checkbox, Input, Confirm } from "@cliffy/prompt";
 import { Table } from "@cliffy/table";
 import { colors } from "@cliffy/ansi/colors";
 import { ClaudeCliWrapper } from "./claude-cli-wrapper.ts";
+import { InteractiveMode } from "./interactive-ui.ts";
 import type { 
   ClaudeSession, 
   SessionSelection,
@@ -428,6 +429,7 @@ Usage: ${programName} [OPTIONS]
 
 Options:
   -h, --help          Show this help message
+  -i, --interactive   Launch interactive browser with rich UI
   -l, --list          List all sessions in a table
   -r, --resume ID     Resume specific session
   -v, --view ID       View session conversation
@@ -438,6 +440,15 @@ Options:
   --no-tmux           Run without tmux integration
   --zoxide            Sort by zoxide frecency
   --debug             Show debug information for troubleshooting
+
+Interactive Mode Keys:
+  ↑/↓ or j/k    Navigate sessions
+  Enter         View conversation
+  r             Resume session
+  e             Export session
+  d             Delete session
+  /             Search
+  ESC or q      Quit
 
 Examples:
   # Interactive selection
@@ -529,6 +540,10 @@ Examples:
   } else if (flags.list) {
     // List all sessions in a table
     displaySessionsTable(sessions);
+  } else if (flags.interactive || (!Object.keys(flags).filter(k => k !== "_").length && Deno.stdin.isTerminal())) {
+    // Launch interactive mode when explicitly requested or when no args provided and TTY available
+    const interactive = new InteractiveMode(claude);
+    await interactive.run();
   } else {
     // Interactive selection - check if we can use Cliffy or need simple mode
     const stdinTty = Deno.stdin.isTerminal();
