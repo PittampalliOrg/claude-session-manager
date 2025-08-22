@@ -13,6 +13,7 @@ mkdir -p binaries
 echo "📦 Building for Linux x64..."
 deno compile \
   --allow-all \
+  --no-check \
   --target x86_64-unknown-linux-gnu \
   --output binaries/claude-manager-linux-x64 \
   claude-session-manager.ts
@@ -21,6 +22,7 @@ deno compile \
 echo "📦 Building for Linux ARM64..."
 deno compile \
   --allow-all \
+  --no-check \
   --target aarch64-unknown-linux-gnu \
   --output binaries/claude-manager-linux-arm64 \
   claude-session-manager.ts
@@ -29,6 +31,7 @@ deno compile \
 echo "📦 Building for macOS x64 (Intel)..."
 deno compile \
   --allow-all \
+  --no-check \
   --target x86_64-apple-darwin \
   --output binaries/claude-manager-macos-x64 \
   claude-session-manager.ts
@@ -37,6 +40,7 @@ deno compile \
 echo "📦 Building for macOS ARM64 (Apple Silicon)..."
 deno compile \
   --allow-all \
+  --no-check \
   --target aarch64-apple-darwin \
   --output binaries/claude-manager-macos-arm64 \
   claude-session-manager.ts
@@ -45,6 +49,7 @@ deno compile \
 echo "📦 Building for Windows x64..."
 deno compile \
   --allow-all \
+  --no-check \
   --target x86_64-pc-windows-msvc \
   --output binaries/claude-manager-windows-x64.exe \
   claude-session-manager.ts
