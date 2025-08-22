@@ -1,5 +1,6 @@
 # Compiled binaries
 claude-manager
+claude-manager-*
 *.exe
 *.dll
 *.so
@@ -45,4 +46,7 @@ npm-debug.log*
 
 # Nix result symlinks
 result
-result-*binaries/
+result-*
+
+# Build output directory
+binaries/
