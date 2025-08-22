@@ -165,4 +165,44 @@ $(cd binaries && sha256sum claude-manager-* 2>/dev/null || shasum -a 256 claude-
     
     echo "✅ GitHub release $VERSION created/updated successfully!"
     echo "   View at: https://github.com/PittampalliOrg/claude-session-manager/releases/tag/$VERSION"
+    
+    # Automatically update NixOS configuration if the script exists
+    if [ -f "./update-nixos-hash.sh" ]; then
+        echo ""
+        echo "🔄 Automatically updating NixOS configuration..."
+        echo ""
+        # Wait a moment for the release to be fully available
+        sleep 2
+        
+        # Run the update script
+        if ./update-nixos-hash.sh "$VERSION"; then
+            echo ""
+            echo "✅ NixOS configuration updated and system rebuilt successfully!"
+        else
+            echo ""
+            echo "⚠️  NixOS update failed. You can manually run:"
+            echo "   ./update-nixos-hash.sh $VERSION"
+        fi
+    else
+        # Fallback to manual instructions if update script doesn't exist
+        echo ""
+        echo "📝 NixOS Manual Update Instructions:"
+        echo "1. Get the SHA256 hash for NixOS:"
+        echo "   nix-prefetch-url https://github.com/PittampalliOrg/claude-session-manager/releases/download/$VERSION/claude-manager-linux-x64"
+        echo ""
+        echo "2. Convert to SRI format:"
+        echo "   nix hash to-sri --type sha256 <HASH_FROM_ABOVE>"
+        echo ""
+        echo "3. Update /etc/nixos/packages/claude-manager-fetchurl.nix:"
+        echo "   - Change version = \"...\"; to version = \"${VERSION#v}\";"
+        echo "   - Update the sha256 hash with the SRI hash from step 2"
+        echo ""
+        echo "4. Rebuild NixOS:"
+        echo "   sudo nixos-rebuild switch"
+    fi
+else
+    # When not creating a release, show instructions
+    echo ""
+    echo "💡 To create a GitHub release and update NixOS, run:"
+    echo "   ./build-all-platforms.sh $VERSION true"
 fi
