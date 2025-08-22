@@ -45,4 +45,4 @@ npm-debug.log*
 
 # Nix result symlinks
 result
-result-*
+result-*binaries/
