@@ -409,9 +409,9 @@ async function exportSession(session: ClaudeSession, format: ExportFormat = "mar
 async function main() {
   // Parse arguments
   const flags = parse(Deno.args, {
-    boolean: ["help", "list", "zoxide", "no-tmux", "simple", "debug"],
+    boolean: ["help", "list", "zoxide", "no-tmux", "simple", "debug", "interactive"],
     string: ["resume", "view", "export", "delete", "search"],
-    alias: { h: "help", l: "list", r: "resume", v: "view", e: "export", d: "delete", s: "search" },
+    alias: { h: "help", l: "list", r: "resume", v: "view", e: "export", d: "delete", s: "search", i: "interactive" },
   });
   
   // Detect if running as compiled binary or from source
